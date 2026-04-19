@@ -38,42 +38,46 @@ async function transcribeWithWhisper(audioPath: string): Promise<TranscriptSegme
     timestamp_granularities: ['segment', 'word'],
   });
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const data = response as any;
-  const rawSegments = data.segments ?? [];
-  const rawWords = data.words ?? [];
+  type AnyObj = Record<string, unknown>;
+  const data = response as unknown as AnyObj;
+  const rawSegments = (data.segments as AnyObj[] | undefined) ?? [];
+  const rawWords = (data.words as AnyObj[] | undefined) ?? [];
 
   return rawSegments.map(
-    (seg: { start: number; end: number; text: string }, segIdx: number) => {
-      // Find words that fall within this segment
+    (seg: AnyObj, segIdx: number) => {
+      const segStart = seg.start as number;
+      const segEnd = seg.end as number;
+      const segText = (seg.text as string).trim();
+
       const segWords: TranscriptWord[] = rawWords
-        .filter((w: { start: number }) => w.start >= seg.start && w.start < seg.end)
-        .map((w: { word: string; start: number; end: number }) => ({
-          word: w.word.trim(),
-          start: w.start,
-          end: w.end,
-          isKeyword: isKeyword(w.word),
+        .filter((w: AnyObj) => (w.start as number) >= segStart && (w.start as number) < segEnd)
+        .map((w: AnyObj) => ({
+          word: (w.word as string).trim(),
+          start: w.start as number,
+          end: w.end as number,
+          isKeyword: isKeyword(w.word as string),
         }));
 
       // If no word-level timestamps, split text evenly
       if (segWords.length === 0) {
-        const words = seg.text.trim().split(/\s+/);
-        const duration = seg.end - seg.start;
+        const words = segText.split(/\s+/);
+        const duration = segEnd - segStart;
         const wordDur = duration / words.length;
         segWords.push(
           ...words.map((word, i) => ({
             word,
-            start: seg.start + i * wordDur,
-            end: seg.start + (i + 1) * wordDur,
+            start: segStart + i * wordDur,
+            end: segStart + (i + 1) * wordDur,
             isKeyword: isKeyword(word),
           })),
         );
       }
 
+      void segIdx;
       return {
-        start: seg.start,
-        end: seg.end,
-        text: seg.text.trim(),
+        start: segStart,
+        end: segEnd,
+        text: segText,
         words: segWords,
         _segIdx: segIdx,
       };
