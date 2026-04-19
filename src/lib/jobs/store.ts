@@ -1,9 +1,34 @@
+import fs from 'fs';
+import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import type { Job, JobStatus, JobStep, AnalysisResult, TemplateId, ViralityResult } from '@/types';
 
-// In-memory job store — singleton across all Next.js API route invocations
-// (acceptable for MVP; swap for Redis in production)
-const jobs = new Map<string, Job>();
+// File-based job store — works across serverless function invocations (Vercel /tmp)
+const JOBS_DIR = path.join(process.env.JOBS_DIR ?? '/tmp', 'montage-jobs', 'jobs');
+
+function ensureJobsDir(): void {
+  if (!fs.existsSync(JOBS_DIR)) {
+    fs.mkdirSync(JOBS_DIR, { recursive: true });
+  }
+}
+
+function jobPath(id: string): string {
+  return path.join(JOBS_DIR, `${id}.json`);
+}
+
+function readJob(id: string): Job | undefined {
+  try {
+    const raw = fs.readFileSync(jobPath(id), 'utf-8');
+    return JSON.parse(raw) as Job;
+  } catch {
+    return undefined;
+  }
+}
+
+function writeJob(job: Job): void {
+  ensureJobsDir();
+  fs.writeFileSync(jobPath(job.id), JSON.stringify(job), 'utf-8');
+}
 
 const STEP_NAMES = [
   'Analyse de la vidéo principale',
@@ -21,10 +46,7 @@ function buildSteps(names: string[]): JobStep[] {
   return names.map((name) => ({ name, status: 'pending', progress: 0 }));
 }
 
-export function createJob(
-  mainVideoPath: string,
-  referenceVideoPaths: string[],
-): Job {
+export function createJob(mainVideoPath: string, referenceVideoPaths: string[]): Job {
   const id = uuidv4();
   const now = Date.now();
   const job: Job = {
@@ -37,18 +59,18 @@ export function createJob(
     referenceVideoPaths,
     template: 'tiktok',
   };
-  jobs.set(id, job);
+  writeJob(job);
   return job;
 }
 
 export function getJob(id: string): Job | undefined {
-  return jobs.get(id);
+  return readJob(id);
 }
 
 export function updateJob(id: string, updates: Partial<Job>): void {
-  const job = jobs.get(id);
+  const job = readJob(id);
   if (!job) return;
-  jobs.set(id, { ...job, ...updates, updatedAt: Date.now() });
+  writeJob({ ...job, ...updates, updatedAt: Date.now() });
 }
 
 export function setJobStatus(id: string, status: JobStatus, error?: string): void {
@@ -63,25 +85,17 @@ export function setJobTemplate(id: string, template: TemplateId): void {
   updateJob(id, { template });
 }
 
-export function setJobOutput(
-  id: string,
-  outputPath: string,
-  viralityScore: ViralityResult,
-): void {
+export function setJobOutput(id: string, outputPath: string, viralityScore: ViralityResult): void {
   updateJob(id, { status: 'complete', outputPath, viralityScore });
 }
 
-export function updateStep(
-  jobId: string,
-  stepName: string,
-  update: Partial<JobStep>,
-): void {
-  const job = jobs.get(jobId);
+export function updateStep(jobId: string, stepName: string, update: Partial<JobStep>): void {
+  const job = readJob(jobId);
   if (!job) return;
   const steps = job.steps.map((s) =>
     s.name === stepName ? { ...s, ...update } : s,
   );
-  jobs.set(jobId, { ...job, steps, updatedAt: Date.now() });
+  writeJob({ ...job, steps, updatedAt: Date.now() });
 }
 
 export function markStepDone(jobId: string, stepName: string): void {
@@ -94,14 +108,4 @@ export function markStepRunning(jobId: string, stepName: string, message?: strin
 
 export function markStepError(jobId: string, stepName: string, message: string): void {
   updateStep(jobId, stepName, { status: 'error', message });
-}
-
-// Cleanup jobs older than TTL (call periodically in a real app)
-export function cleanupOldJobs(ttlMs = 24 * 60 * 60 * 1000): void {
-  const cutoff = Date.now() - ttlMs;
-  for (const [id, job] of jobs.entries()) {
-    if (job.createdAt < cutoff) {
-      jobs.delete(id);
-    }
-  }
 }

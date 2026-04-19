@@ -1,12 +1,19 @@
 import path from 'path';
 
+// Use /tmp on Vercel (serverless), local ./uploads in dev
+const isVercel = process.env.VERCEL === '1';
+
 const BASE_UPLOAD = process.env.UPLOAD_DIR
   ? path.resolve(process.env.UPLOAD_DIR)
-  : path.resolve(process.cwd(), 'uploads');
+  : isVercel
+    ? '/tmp/montage-uploads'
+    : path.resolve(process.cwd(), 'uploads');
 
 const BASE_OUTPUT = process.env.OUTPUT_DIR
   ? path.resolve(process.env.OUTPUT_DIR)
-  : path.resolve(process.cwd(), 'processed');
+  : isVercel
+    ? '/tmp/montage-processed'
+    : path.resolve(process.cwd(), 'processed');
 
 export const getUploadDir = () => BASE_UPLOAD;
 export const getOutputDir = () => BASE_OUTPUT;
