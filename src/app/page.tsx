@@ -30,6 +30,13 @@ export default function HomePage() {
   const handleGenerate = async () => {
     if (!mainVideo) return;
 
+    // Warn if file is too large for Vercel Hobby (4.5MB limit)
+    const fileSizeMB = mainVideo.size / 1024 / 1024;
+    if (fileSizeMB > 100) {
+      setError(`Fichier trop volumineux (${fileSizeMB.toFixed(1)}MB). Maximum 100MB. Compresse ta vidéo ou utilise une version plus courte.`);
+      return;
+    }
+
     setError(null);
     setUploadState('uploading');
     setUploadProgress(10);
@@ -44,16 +51,34 @@ export default function HomePage() {
     try {
       setUploadProgress(30);
 
-      const res = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      });
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 120_000); // 2min timeout
+
+      let res: Response;
+      try {
+        res = await fetch('/api/upload', {
+          method: 'POST',
+          body: formData,
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+      } catch (fetchErr) {
+        clearTimeout(timeout);
+        if ((fetchErr as Error).name === 'AbortError') {
+          throw new Error('Timeout : la vidéo est trop volumineuse pour ce serveur. Essaie une vidéo plus courte (< 30 secondes).');
+        }
+        throw fetchErr;
+      }
 
       setUploadProgress(80);
 
       if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error ?? 'Erreur lors de l\'upload');
+        let errMsg = 'Erreur lors de l\'upload';
+        try {
+          const data = await res.json();
+          errMsg = data.error ?? errMsg;
+        } catch { /* response not JSON */ }
+        throw new Error(errMsg);
       }
 
       const { jobId } = await res.json();

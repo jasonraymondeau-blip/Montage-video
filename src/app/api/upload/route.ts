@@ -1,21 +1,32 @@
 import { NextRequest, NextResponse } from 'next/server';
 import path from 'path';
-import { createJob } from '@/lib/jobs/store';
+import { waitUntil } from '@vercel/functions';
+import { createJob, updateJob, getJob, setJobAnalysis, setJobStatus } from '@/lib/jobs/store';
 import { ensureJobDirectories, saveBuffer, getVideoExtension } from '@/lib/storage/local';
 import { getMainVideoPath, getRefVideoPath } from '@/lib/storage/paths';
 import { runAnalysis } from '@/lib/montage/engine';
-import { setJobAnalysis } from '@/lib/jobs/store';
 
-const MAX_FILE_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB ?? '500');
+// Allow up to 300s for video processing (requires Vercel Pro; Hobby is capped at 10s)
+export const maxDuration = 300;
+export const runtime = 'nodejs';
+
+// Vercel Hobby plan limits: 4.5MB body, 10s timeout
+// Vercel Pro plan limits: no body limit, 300s timeout
+const MAX_FILE_SIZE_MB = parseInt(process.env.MAX_UPLOAD_SIZE_MB ?? '100');
 const MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
 const ALLOWED_TYPES = ['video/mp4', 'video/quicktime', 'video/mov', 'video/x-msvideo', 'video/avi'];
 
-export const runtime = 'nodejs';
-
-// Increase body size limit for video uploads
 export async function POST(request: NextRequest) {
   try {
-    const formData = await request.formData();
+    let formData: FormData;
+    try {
+      formData = await request.formData();
+    } catch {
+      return NextResponse.json(
+        { error: 'Fichier trop volumineux ou format invalide. Essaie une vidéo de moins de 50MB.' },
+        { status: 413 },
+      );
+    }
 
     const mainVideoFile = formData.get('mainVideo') as File | null;
     if (!mainVideoFile) {
@@ -24,33 +35,27 @@ export async function POST(request: NextRequest) {
 
     if (!isAllowedVideoType(mainVideoFile)) {
       return NextResponse.json(
-        { error: 'Format vidéo non supporté. Utilisez MP4 ou MOV.' },
+        { error: 'Format non supporté. Utilisez MP4 ou MOV.' },
         { status: 400 },
       );
     }
 
     if (mainVideoFile.size > MAX_FILE_SIZE) {
       return NextResponse.json(
-        { error: `Fichier trop volumineux. Maximum ${MAX_FILE_SIZE_MB}MB.` },
-        { status: 400 },
+        { error: `Fichier trop volumineux (${(mainVideoFile.size / 1024 / 1024).toFixed(1)}MB). Maximum ${MAX_FILE_SIZE_MB}MB sur ce plan.` },
+        { status: 413 },
       );
     }
 
-    // Collect reference videos (optional)
+    // Collect reference videos (optional, max 5)
     const refFiles: File[] = [];
     for (let i = 0; i < 5; i++) {
       const ref = formData.get(`ref_${i}`) as File | null;
-      if (ref && ref.size > 0) {
-        if (!isAllowedVideoType(ref)) continue;
-        refFiles.push(ref);
-      }
+      if (ref && ref.size > 0 && isAllowedVideoType(ref)) refFiles.push(ref);
     }
-    // Also support referenceVideos[] array field name
     const refArray = formData.getAll('referenceVideos') as File[];
     for (const ref of refArray) {
-      if (ref && ref.size > 0 && isAllowedVideoType(ref)) {
-        refFiles.push(ref);
-      }
+      if (ref && ref.size > 0 && isAllowedVideoType(ref)) refFiles.push(ref);
     }
 
     // Create job and directories
@@ -70,33 +75,28 @@ export async function POST(request: NextRequest) {
       const ref = refFiles[i];
       const refExt = getVideoExtension(ref.name);
       const refPath = getRefVideoPath(jobId, i, refExt);
-      const refBuffer = Buffer.from(await ref.arrayBuffer());
-      await saveBuffer(refBuffer, refPath);
+      await saveBuffer(Buffer.from(await ref.arrayBuffer()), refPath);
       refPaths.push(refPath);
     }
 
-    // Update job with actual file paths
-    const { updateJob } = await import('@/lib/jobs/store');
     updateJob(jobId, { mainVideoPath, referenceVideoPaths: refPaths });
+    const updatedJob = getJob(jobId)!;
 
-    const updatedJob = (await import('@/lib/jobs/store')).getJob(jobId)!;
-
-    // Kick off analysis asynchronously (fire and forget)
-    runAnalysis(updatedJob)
-      .then((analysis) => setJobAnalysis(jobId, analysis))
-      .catch((err) => {
-        console.error(`[job:${jobId}] Analysis failed:`, err);
-        const { setJobStatus } = require('@/lib/jobs/store');
-        setJobStatus(jobId, 'error', err.message);
-      });
+    // Use waitUntil to keep the serverless function alive after response
+    waitUntil(
+      runAnalysis(updatedJob)
+        .then((analysis) => setJobAnalysis(jobId, analysis))
+        .catch((err: Error) => {
+          console.error(`[job:${jobId}] Analysis failed:`, err);
+          setJobStatus(jobId, 'error', err.message);
+        }),
+    );
 
     return NextResponse.json({ jobId }, { status: 201 });
   } catch (err) {
     console.error('[upload] Error:', err);
-    return NextResponse.json(
-      { error: 'Erreur interne du serveur' },
-      { status: 500 },
-    );
+    const message = err instanceof Error ? err.message : 'Erreur interne';
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }
 
